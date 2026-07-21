@@ -328,12 +328,7 @@ class DescMessage:
         for field in self.fields:
             if single_present_fast_path_eligible:
                 single_present_fast_path_eligible = (
-                    field._requires_presence
-                    and isinstance(
-                        field.value, (DescFieldValueScalar, DescFieldValueEnum)
-                    )
-                    and field.value.oneof is None
-                    and field.number not in field_numbers
+                    field._requires_presence and field.number not in field_numbers
                 )
                 if single_present_fast_path_eligible:
                     field_numbers.add(field.number)
