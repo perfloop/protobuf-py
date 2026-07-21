@@ -29,19 +29,21 @@ if TYPE_CHECKING:
 
 
 _WIDE_SPARSE_SHAPES = [
-    pytest.param(10, 1, id="f10-s1"),
-    pytest.param(100, 1, id="f100-s1"),
-    pytest.param(100, 10, id="f100-s10"),
-    pytest.param(1000, 1, id="f1000-s1"),
-    pytest.param(1000, 10, id="f1000-s10"),
-    pytest.param(1000, 1000, id="f1000-s1000"),
+    pytest.param("f10-s1", 10, 1, id="f10-s1"),
+    pytest.param("f100-s1", 100, 1, id="f100-s1"),
+    pytest.param("f100-s10", 100, 10, id="f100-s10"),
+    pytest.param("f1000-s1", 1000, 1, id="f1000-s1"),
+    pytest.param("f1000-s10", 1000, 10, id="f1000-s10"),
+    pytest.param("f1000-s1000", 1000, 1000, id="f1000-s1000"),
 ]
 
 
-@pytest.mark.parametrize(("field_count", "selected_count"), _WIDE_SPARSE_SHAPES)
+@pytest.mark.parametrize(
+    ("_id", "field_count", "selected_count"), _WIDE_SPARSE_SHAPES
+)
 @pytest.mark.benchmark(min_time=0.1)
 def test_to_binary_wide_sparse(
-    field_count: int, selected_count: int, benchmark: BenchmarkFixture
+    _id: str, field_count: int, selected_count: int, benchmark: BenchmarkFixture
 ) -> None:
     field_numbers = range(1, field_count + 1)
     selected_numbers = range(1, selected_count + 1)
