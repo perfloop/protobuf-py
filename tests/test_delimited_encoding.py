@@ -183,6 +183,13 @@ def test_mismatched_egroup() -> None:
         DelimitedEncoding.from_binary(data)
 
 
+def test_zero_field_number_egroup() -> None:
+    data = bytes([2 << 3 | WireType.SGROUP, WireType.EGROUP])
+
+    with pytest.raises(ValueError, match="invalid tag with field number 0"):
+        DelimitedEncoding.from_binary(data)
+
+
 def test_all_fields_roundtrip() -> None:
     msg = DelimitedEncoding(
         name="a",

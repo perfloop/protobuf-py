@@ -114,9 +114,9 @@ def read_message(
 
     while group_number is not None or reader.offset < end:
         tag_raw = reader.varint(5, 0x0F)
-        tag = Tag(tag_raw) if group_number is not None else None
 
-        if tag is not None and tag.wire_type == WireType.EGROUP:
+        if group_number is not None and tag_raw & 0x07 == WireType.EGROUP:
+            tag = Tag(tag_raw)
             if tag.number != group_number:
                 msg = f"mismatched group end tag: expected {group_number}, got {tag.number}"
                 raise ValueError(msg)
@@ -125,8 +125,7 @@ def read_message(
         desc_field = desc_message._fields_by_tag.get(tag_raw)
 
         if desc_field is None:  # Unknown field
-            if tag is None:
-                tag = Tag(tag_raw)
+            tag = Tag(tag_raw)
             field_raw = reader.skip(tag.wire_type, depth + 1, field_number=tag.number)
             if not opts.ignore_unknown_fields:
                 key_raw = _encode_varint((tag.number << 3) | tag.wire_type)
