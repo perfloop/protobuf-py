@@ -31,6 +31,8 @@ from ._wire._binary_writer import BinaryWriter
 from ._wire._wire_type import WireType
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from ._descriptors import DescField
     from ._message import Message
 
@@ -195,6 +197,17 @@ def _field_by_number(desc: DescMessage, field_number: int) -> DescField:
     raise AssertionError(msg)
 
 
+def _single_present_fields(
+    message: Message, desc: DescMessage, field_number: int
+) -> Iterator[DescField]:
+    direct_field = _field_by_number(desc, field_number)
+    yield direct_field
+    if len(message._present) != 1 or field_number not in message._present:
+        for following_field in desc.fields[desc.fields.index(direct_field) + 1 :]:
+            if message._contains_member(following_field):
+                yield following_field
+
+
 def write_message(
     message: Message, writer: BinaryWriter, opts: ToBinaryOptions
 ) -> None:
@@ -203,7 +216,7 @@ def write_message(
         desc = message._desc
         if desc._single_present_fast_path_eligible:
             field_number = next(iter(message._present))
-            desc_fields = (_field_by_number(desc, field_number),)
+            desc_fields = _single_present_fields(message, desc, field_number)
     for desc_field in desc_fields:
         value = message._get_member(desc_field)
         match field_value := desc_field.value:

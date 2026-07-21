@@ -105,6 +105,55 @@ def test_to_binary_reemits_single_parsed_explicit_enum_out_of_order() -> None:
     assert message.to_binary() == b"\xf0\x01\x00"
 
 
+def test_to_binary_preserves_singleton_reentrant_mutation() -> None:
+    descriptor_set = FileDescriptorSet(
+        file=[
+            FileDescriptorProto(
+                name="reentrant_string.proto",
+                syntax="proto2",
+                message_type=[
+                    DescriptorProto(
+                        name="ReentrantString",
+                        field=[
+                            FieldDescriptorProto(
+                                name="text",
+                                number=1,
+                                label=OPTIONAL,
+                                type=FIELD_TYPE.STRING,
+                            ),
+                            FieldDescriptorProto(
+                                name="later",
+                                number=2,
+                                label=OPTIONAL,
+                                type=FIELD_TYPE.BOOL,
+                            ),
+                        ],
+                    )
+                ],
+            )
+        ]
+    )
+    registry = FileDescriptorSet.from_binary(descriptor_set.to_binary()).to_registry()
+    desc = registry.message("ReentrantString")
+    assert desc is not None
+    assert desc._single_present_fast_path_eligible
+
+    message = desc.type()
+
+    class SetLaterString(str):
+        __slots__ = ()
+
+        def encode(self, encoding: str = "utf-8", errors: str = "strict") -> bytes:
+            message.later = True
+            return super().encode(encoding, errors)
+
+    message.text = SetLaterString("text")
+    expected = b"\x0a\x04text\x10\x01"
+
+    assert message.to_binary() == expected
+    assert message.to_binary() == expected
+
+
 @pytest.mark.parametrize(
     ("fields", "values", "wire"),
     [
