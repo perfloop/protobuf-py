@@ -31,6 +31,7 @@ from ._wire._binary_writer import BinaryWriter
 from ._wire._wire_type import WireType
 
 if TYPE_CHECKING:
+    from ._descriptors import DescField
     from ._message import Message
 
 
@@ -180,10 +181,30 @@ def write_map_field(
         writer.join()
 
 
+def _single_present_field(message: Message) -> DescField:
+    field_number = next(iter(message._present))
+    for wire_type in (
+        WireType.VARINT,
+        WireType.BIT64,
+        WireType.LENGTH_DELIMITED,
+        WireType.BIT32,
+    ):
+        field = message._desc._fields_by_tag.get(field_number << 3 | wire_type)
+        if field is not None:
+            return field
+    msg = f"cannot resolve present field {field_number}"
+    raise AssertionError(msg)
+
+
 def write_message(
     message: Message, writer: BinaryWriter, opts: ToBinaryOptions
 ) -> None:
-    for desc_field in message:
+    desc_fields = (
+        (_single_present_field(message),)
+        if message._desc._all_fields_require_presence and len(message._present) == 1
+        else message
+    )
+    for desc_field in desc_fields:
         value = message._get_member(desc_field)
         match field_value := desc_field.value:
             case DescFieldValueScalar():

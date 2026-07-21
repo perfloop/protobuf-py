@@ -303,6 +303,11 @@ class DescMessage:
     )
     """Whether this message has any fields that require separate presence tracking."""
 
+    _all_fields_require_presence: bool = dataclassfield(
+        repr=False, compare=False, hash=False, init=False
+    )
+    """Whether every field uses separate presence tracking."""
+
     def _finish_init(self) -> None:
         """Finish initialization of private attributes.
 
@@ -318,7 +323,11 @@ class DescMessage:
         fields_by_tag: dict[int, DescField] = {}
         fields_by_json_name: dict[str, DescField] = {}
         fields_by_name: dict[str, DescField] = {}
+        all_fields_require_presence = True
         for field in self.fields:
+            all_fields_require_presence = (
+                all_fields_require_presence and field._requires_presence
+            )
             if (
                 not isinstance(field.value, DescFieldValueSingular)
                 or field.value.oneof is None
@@ -341,6 +350,9 @@ class DescMessage:
         object.__setattr__(self, "_fields_by_tag", fields_by_tag)
         object.__setattr__(self, "_fields_by_json_name", fields_by_json_name)
         object.__setattr__(self, "_fields_by_name", fields_by_name)
+        object.__setattr__(
+            self, "_all_fields_require_presence", all_fields_require_presence
+        )
 
         oneofs_by_local_name: dict[str, DescOneof] = {}
         oneofs_by_name: dict[str, DescOneof] = {}
