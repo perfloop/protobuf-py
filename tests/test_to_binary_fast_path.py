@@ -56,8 +56,7 @@ def test_to_binary_reemits_single_parsed_explicit_scalar(
     field_name: str, wire: bytes
 ) -> None:
     desc = _import_scalars()
-    assert desc._all_fields_are_presence_tracked_scalars
-    assert desc._field_numbers_unique
+    assert desc._single_present_fast_path_eligible
 
     message = desc.type.from_binary(wire)
 
@@ -98,8 +97,7 @@ def test_to_binary_reemits_single_parsed_explicit_enum_out_of_order() -> None:
     registry = FileDescriptorSet.from_binary(descriptor_set.to_binary()).to_registry()
     desc = registry.message("OutOfOrder")
     assert desc is not None
-    assert desc._all_fields_are_presence_tracked_scalars
-    assert desc._field_numbers_unique
+    assert desc._single_present_fast_path_eligible
 
     message = desc.type.from_binary(b"\xf0\x01\x00")
 
@@ -154,7 +152,6 @@ def test_to_binary_preserves_duplicate_dynamic_field_numbers(
     )
     desc = descriptor_set.to_registry().message("DuplicateFieldNumbers")
     assert desc is not None
-    assert desc._all_fields_are_presence_tracked_scalars
-    assert not desc._field_numbers_unique
+    assert not desc._single_present_fast_path_eligible
 
     assert desc.type(**values).to_binary() == wire

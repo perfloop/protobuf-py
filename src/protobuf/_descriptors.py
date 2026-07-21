@@ -303,15 +303,10 @@ class DescMessage:
     )
     """Whether this message has any fields that require separate presence tracking."""
 
-    _all_fields_are_presence_tracked_scalars: bool = dataclassfield(
+    _single_present_fast_path_eligible: bool = dataclassfield(
         repr=False, compare=False, hash=False, init=False
     )
-    """Whether every field is a non-oneof scalar or enum with explicit presence."""
-
-    _field_numbers_unique: bool = dataclassfield(
-        repr=False, compare=False, hash=False, init=False
-    )
-    """Whether each declared field has a distinct field number."""
+    """Whether all fields are unique, explicit non-oneof scalars or enums."""
 
     def _finish_init(self) -> None:
         """Finish initialization of private attributes.
@@ -328,19 +323,20 @@ class DescMessage:
         fields_by_tag: dict[int, DescField] = {}
         fields_by_json_name: dict[str, DescField] = {}
         fields_by_name: dict[str, DescField] = {}
-        all_fields_are_presence_tracked_scalars = True
+        single_present_fast_path_eligible = True
         field_numbers: set[int] = set()
-        field_numbers_unique = True
         for field in self.fields:
-            all_fields_are_presence_tracked_scalars = (
-                all_fields_are_presence_tracked_scalars
-                and field._requires_presence
-                and isinstance(field.value, (DescFieldValueScalar, DescFieldValueEnum))
-                and field.value.oneof is None
-            )
-            if field.number in field_numbers:
-                field_numbers_unique = False
-            field_numbers.add(field.number)
+            if single_present_fast_path_eligible:
+                single_present_fast_path_eligible = (
+                    field._requires_presence
+                    and isinstance(
+                        field.value, (DescFieldValueScalar, DescFieldValueEnum)
+                    )
+                    and field.value.oneof is None
+                    and field.number not in field_numbers
+                )
+                if single_present_fast_path_eligible:
+                    field_numbers.add(field.number)
             if (
                 not isinstance(field.value, DescFieldValueSingular)
                 or field.value.oneof is None
@@ -365,10 +361,9 @@ class DescMessage:
         object.__setattr__(self, "_fields_by_name", fields_by_name)
         object.__setattr__(
             self,
-            "_all_fields_are_presence_tracked_scalars",
-            all_fields_are_presence_tracked_scalars,
+            "_single_present_fast_path_eligible",
+            single_present_fast_path_eligible,
         )
-        object.__setattr__(self, "_field_numbers_unique", field_numbers_unique)
 
         oneofs_by_local_name: dict[str, DescOneof] = {}
         oneofs_by_name: dict[str, DescOneof] = {}

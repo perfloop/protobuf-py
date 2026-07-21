@@ -201,7 +201,7 @@ def write_message(
     desc_fields = message
     if len(message._present) == 1:
         desc = message._desc
-        if desc._all_fields_are_presence_tracked_scalars and desc._field_numbers_unique:
+        if desc._single_present_fast_path_eligible:
             field_number = next(iter(message._present))
             desc_fields = (_field_by_number(desc, field_number),)
     for desc_field in desc_fields:
