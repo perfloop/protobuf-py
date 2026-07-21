@@ -181,15 +181,14 @@ def write_map_field(
         writer.join()
 
 
-def _single_present_field(message: Message) -> DescField:
-    field_number = next(iter(message._present))
+def _field_by_number(desc: DescMessage, field_number: int) -> DescField:
     for wire_type in (
         WireType.VARINT,
         WireType.BIT64,
         WireType.LENGTH_DELIMITED,
         WireType.BIT32,
     ):
-        field = message._desc._fields_by_tag.get(field_number << 3 | wire_type)
+        field = desc._fields_by_tag.get(field_number << 3 | wire_type)
         if field is not None:
             return field
     msg = f"cannot resolve present field {field_number}"
@@ -199,11 +198,12 @@ def _single_present_field(message: Message) -> DescField:
 def write_message(
     message: Message, writer: BinaryWriter, opts: ToBinaryOptions
 ) -> None:
-    desc_fields = (
-        (_single_present_field(message),)
-        if message._desc._all_fields_require_presence and len(message._present) == 1
-        else message
-    )
+    desc_fields = message
+    if len(message._present) == 1:
+        desc = message._desc
+        if desc._all_fields_are_presence_tracked_scalars and desc._field_numbers_unique:
+            field_number = next(iter(message._present))
+            desc_fields = (_field_by_number(desc, field_number),)
     for desc_field in desc_fields:
         value = message._get_member(desc_field)
         match field_value := desc_field.value:
