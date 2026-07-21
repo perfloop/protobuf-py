@@ -27,7 +27,7 @@ from tests.gen.enums_pb import Color
 from tests.gen.scalars_pb import Scalars
 
 if TYPE_CHECKING:
-    from protobuf import DescMessage
+    from protobuf import DescMessage, Message
 
 OPTIONAL = FieldDescriptorProto.Label.OPTIONAL
 FIELD_TYPE = FieldDescriptorProto.Type
@@ -39,6 +39,21 @@ def _import_scalars() -> DescMessage:
     desc = registry.message("Scalars")
     assert desc is not None
     return desc
+
+
+def _assert_direct_serialization(
+    message: Message, wire: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_iter = type(message).__iter__
+
+    def reject_generic_iteration(other: Message) -> object:
+        if other is message:
+            msg = "eligible singleton serialization used Message.__iter__"
+            raise AssertionError(msg)
+        return original_iter(other)
+
+    monkeypatch.setattr(type(message), "__iter__", reject_generic_iteration)
+    assert message.to_binary() == wire
 
 
 @pytest.mark.parametrize(
@@ -53,7 +68,7 @@ def _import_scalars() -> DescMessage:
     ],
 )
 def test_to_binary_reemits_single_parsed_explicit_scalar(
-    field_name: str, wire: bytes
+    field_name: str, wire: bytes, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     desc = _import_scalars()
     assert desc._single_present_fast_path_eligible
@@ -61,10 +76,12 @@ def test_to_binary_reemits_single_parsed_explicit_scalar(
     message = desc.type.from_binary(wire)
 
     assert message.has_field(field_name)
-    assert message.to_binary() == wire
+    _assert_direct_serialization(message, wire, monkeypatch)
 
 
-def test_to_binary_reemits_single_parsed_explicit_enum_out_of_order() -> None:
+def test_to_binary_reemits_single_parsed_explicit_enum_out_of_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     descriptor_set = FileDescriptorSet(
         file=[
             FileDescriptorProto(
@@ -102,7 +119,7 @@ def test_to_binary_reemits_single_parsed_explicit_enum_out_of_order() -> None:
     message = desc.type.from_binary(b"\xf0\x01\x00")
 
     assert message.has_field("color")
-    assert message.to_binary() == b"\xf0\x01\x00"
+    _assert_direct_serialization(message, b"\xf0\x01\x00", monkeypatch)
 
 
 def test_to_binary_preserves_singleton_reentrant_mutation() -> None:
