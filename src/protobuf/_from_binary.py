@@ -30,7 +30,7 @@ from ._descriptors import (
 from ._enum import Enum
 from ._field_values import scalar_zero_value
 from ._typing import assert_never
-from ._wire._binary_reader import DEPTH_LIMIT, BinaryReader
+from ._wire._binary_reader import DEPTH_LIMIT, BinaryReader, Tag
 from ._wire._binary_writer import BinaryWriter
 from ._wire._wire_type import WireType
 
@@ -113,17 +113,20 @@ def read_message(
     end = reader.offset + length  # Only used for length-delimited messages
 
     while group_number is not None or reader.offset < end:
-        tag = reader.tag()
+        tag_raw = reader.varint(5, 0x0F)
+        tag = Tag(tag_raw) if group_number is not None else None
 
-        if group_number is not None and tag.wire_type == WireType.EGROUP:
+        if tag is not None and tag.wire_type == WireType.EGROUP:
             if tag.number != group_number:
                 msg = f"mismatched group end tag: expected {group_number}, got {tag.number}"
                 raise ValueError(msg)
             break
 
-        desc_field = desc_message._fields_by_tag.get(tag.raw)
+        desc_field = desc_message._fields_by_tag.get(tag_raw)
 
         if desc_field is None:  # Unknown field
+            if tag is None:
+                tag = Tag(tag_raw)
             field_raw = reader.skip(tag.wire_type, depth + 1, field_number=tag.number)
             if not opts.ignore_unknown_fields:
                 key_raw = _encode_varint((tag.number << 3) | tag.wire_type)
@@ -144,7 +147,11 @@ def read_message(
                     message._set_member(desc_field, existing)
                 if delimited_encoding:
                     read_message(
-                        existing, reader, opts, depth + 1, group_number=tag.number
+                        existing,
+                        reader,
+                        opts,
+                        depth + 1,
+                        group_number=desc_field.number,
                     )
                 else:
                     read_message(
@@ -162,7 +169,7 @@ def read_message(
                     message._get_member(desc_field),
                     desc_field.number,
                     field_value,
-                    tag.wire_type,
+                    WireType(tag_raw & 0x07),
                     reader,
                     opts,
                     depth,
