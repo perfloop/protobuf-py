@@ -92,7 +92,12 @@ def test_from_binary_rejects_malformed_tags(payload: bytes, match: str) -> None:
         Scalars.from_binary(payload)
 
 
-def test_from_binary_many_known_fields(benchmark: BenchmarkFixture) -> None:
+@pytest.mark.parametrize(
+    "_id", [pytest.param("many_known_fields", id="many_known_fields")]
+)
+def test_from_binary_many_known_fields(
+    _id: str, benchmark: BenchmarkFixture
+) -> None:
     payloads = cycle(_KNOWN_FIELD_PAYLOADS)
 
     def decode() -> Scalars:
