@@ -615,6 +615,44 @@ def test_from_json_string_map_unicode() -> None:
     assert dict(msg.string_to_string) == {"café": "東京"}
 
 
+class ClaimsAscii(str):
+    __slots__ = ()
+
+    def isascii(self) -> bool:
+        return True
+
+
+@pytest.mark.parametrize(
+    ("json_obj", "exc_type", "match"),
+    [
+        pytest.param(
+            {"stringToString": {"key": ClaimsAscii("\ud800")}},
+            ValueError,
+            "invalid utf-8 string",
+            id="spoofed-value",
+        ),
+        pytest.param(
+            {"stringToString": {ClaimsAscii("\ud800"): "value"}},
+            ValueError,
+            "invalid utf-8 string",
+            id="spoofed-key",
+        ),
+        pytest.param(
+            {"stringToString": {123: "value"}},
+            TypeError,
+            "expected string got",
+            id="non-string-key",
+        ),
+    ],
+)
+def test_message_from_json_value_string_map_validates_non_plain_strings(
+    json_obj: dict[str, Any], exc_type: type[Exception], match: str
+) -> None:
+    with pytest.raises(exc_type, match=match) as exc_info:
+        message_from_json_value(Maps, cast("Any", json_obj))
+    assert "for field Maps.string_to_string" in str(exc_info.value)
+
+
 def test_from_json_oneof_set_multiple_times() -> None:
     with pytest.raises(ValueError, match="oneof set multiple times"):
         MixedFields.from_json(json.dumps({"oneofField": "a", "oneofBaz": 1}))
