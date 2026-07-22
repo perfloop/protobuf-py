@@ -646,15 +646,27 @@ def _no_duplicates(pairs: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
     catch two identical JSON keys that map to the same dict entry, since
     Python's default JSON parser silently keeps only the last value.
     """
-    obj = dict(pairs)
-    if len(obj) == len(pairs):
+    pair_count = len(pairs)
+    # Bound the temporary dict for malformed input. Larger objects retain the
+    # early-rejection loop so an attacker-controlled suffix cannot grow it.
+    if pair_count <= 1_000:
+        obj = dict(pairs)
+        if len(obj) == pair_count:
+            return obj
+        seen = set[str]()
+        for k, _ in pairs:
+            if k in seen:
+                msg = f"duplicate key: {k}"
+                raise ValueError(msg)
+            seen.add(k)
         return obj
-    seen = set[str]()
-    for k, _ in pairs:
-        if k in seen:
+
+    obj: dict[str, JsonValue] = {}
+    for k, v in pairs:
+        if k in obj:
             msg = f"duplicate key: {k}"
             raise ValueError(msg)
-        seen.add(k)
+        obj[k] = v
     return obj
 
 
