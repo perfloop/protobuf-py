@@ -94,17 +94,17 @@ def test_maps_from_json_calls_duplicate_hook_for_each_nested_object(
 
 
 @pytest.mark.parametrize(
-    ("payload", "member_count"),
+    ("_id", "payload", "member_count"),
     [
-        pytest.param(_map_payload(1), 1, id="1-members"),
-        pytest.param(_map_payload(10), 10, id="10-members"),
-        pytest.param(_map_payload(100), 100, id="100-members"),
-        pytest.param(_map_payload(1000), 1000, id="1000-members"),
+        pytest.param("1-members", _map_payload(1), 1, id="1-members"),
+        pytest.param("10-members", _map_payload(10), 10, id="10-members"),
+        pytest.param("100-members", _map_payload(100), 100, id="100-members"),
+        pytest.param("1000-members", _map_payload(1000), 1000, id="1000-members"),
     ],
 )
 @pytest.mark.benchmark(min_time=0.01)
 def test_maps_from_json_duplicate_free(
-    payload: str, member_count: int, benchmark: BenchmarkFixture
+    _id: str, payload: str, member_count: int, benchmark: BenchmarkFixture
 ) -> None:
     first_key = "key_0"
     last_key = f"key_{member_count - 1}"
