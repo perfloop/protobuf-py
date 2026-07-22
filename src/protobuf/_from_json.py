@@ -298,7 +298,8 @@ def _read_map_field(
     if not isinstance(json, dict):
         raise _field_error(field, f"expected dict got {type(json)}", TypeError)
     if field_value.key is ScalarType.STRING and field_value.value is ScalarType.STRING:
-        for json_key, json_value in json.items():
+        items = iter(json.items())
+        for json_key, json_value in items:
             if (
                 type(json_key) is str
                 and json_key.isascii()
@@ -307,6 +308,14 @@ def _read_map_field(
             ):
                 dict_[json_key] = json_value
                 continue
+            key = _read_string(field, json_key)
+            value = _read_container_item(field, field_value.value, json_value, opts)
+            if value is not None:
+                dict_[key] = value
+            break
+        else:
+            return
+        for json_key, json_value in items:
             key = _read_string(field, json_key)
             value = _read_container_item(field, field_value.value, json_value, opts)
             if value is not None:
