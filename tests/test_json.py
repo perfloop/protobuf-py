@@ -461,6 +461,13 @@ def test_from_json_ignore_unknown_fields() -> None:
     assert msg == Scalars()
 
 
+def test_from_json_duplicate_key() -> None:
+    with pytest.raises(ValueError, match=r"^duplicate key: second$"):
+        Maps.from_json(
+            '{"stringToString":{"first":"one","second":"two","second":"three"}}'
+        )
+
+
 # Range and overflow errors (e.g. int32 too large, float32 overflow) are
 # covered by the conformance suite. These cases focus on type mismatches
 # and parse failures.
