@@ -647,11 +647,11 @@ def _no_duplicates(pairs: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
     Python's default JSON parser silently keeps only the last value.
     """
     obj: dict[str, JsonValue] = {}
-    for k, v in pairs:
-        if k in obj:
+    for expected_size, (k, v) in enumerate(pairs, 1):
+        obj[k] = v
+        if len(obj) != expected_size:
             msg = f"duplicate key: {k}"
             raise ValueError(msg)
-        obj[k] = v
     return obj
 
 
