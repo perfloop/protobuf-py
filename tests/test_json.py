@@ -590,6 +590,31 @@ def test_from_json_map_error(
         Maps.from_json(json.dumps(json_obj))
 
 
+@pytest.mark.parametrize(
+    ("json_obj", "exc_type", "match"),
+    [
+        (
+            {"stringToString": {"key": None}},
+            ValueError,
+            "unexpected null value for map value",
+        ),
+        ({"stringToString": {"key": 123}}, TypeError, "expected string got"),
+        ({"stringToString": {"key": "\ud800"}}, ValueError, "invalid utf-8 string"),
+        ({"stringToString": {"\ud800": "value"}}, ValueError, "invalid utf-8 string"),
+    ],
+)
+def test_from_json_string_map_error(
+    json_obj: dict[str, Any], exc_type: type[Exception], match: str
+) -> None:
+    with pytest.raises(exc_type, match=match):
+        Maps.from_json(json.dumps(json_obj))
+
+
+def test_from_json_string_map_unicode() -> None:
+    msg = Maps.from_json('{"stringToString":{"café":"東京"}}')
+    assert dict(msg.string_to_string) == {"café": "東京"}
+
+
 def test_from_json_oneof_set_multiple_times() -> None:
     with pytest.raises(ValueError, match="oneof set multiple times"):
         MixedFields.from_json(json.dumps({"oneofField": "a", "oneofBaz": 1}))

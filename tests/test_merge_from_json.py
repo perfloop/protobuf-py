@@ -52,6 +52,15 @@ def test_map_merge() -> None:
     assert dict(msg.string_to_string) == {"a": "1", "b": "99", "c": "3"}
 
 
+def test_map_merge_keeps_entries_before_invalid_string_value() -> None:
+    msg = Maps(string_to_string={"existing": "value"})
+
+    with pytest.raises(TypeError, match="expected string got"):
+        merge_from_json(msg, '{"stringToString": {"first": "ok", "bad": 123}}')
+
+    assert dict(msg.string_to_string) == {"existing": "value", "first": "ok"}
+
+
 def test_merge_empty_data() -> None:
     msg = Scalars(int32_field=42)
 

@@ -297,6 +297,16 @@ def _read_map_field(
         return
     if not isinstance(json, dict):
         raise _field_error(field, f"expected dict got {type(json)}", TypeError)
+    if field_value.key is ScalarType.STRING and field_value.value is ScalarType.STRING:
+        for json_key, json_value in json.items():
+            if not json_key.isascii():
+                _read_string(field, json_key)
+            if json_value is None:
+                _read_container_item(field, field_value.value, json_value, opts)
+            elif not isinstance(json_value, str) or not json_value.isascii():
+                _read_string(field, json_value)
+            dict_[json_key] = json_value
+        return
     for json_key, json_value in json.items():
         key = _read_map_key(field, field_value, json_key)
         value = _read_container_item(field, field_value.value, json_value, opts)
@@ -647,11 +657,11 @@ def _no_duplicates(pairs: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
     Python's default JSON parser silently keeps only the last value.
     """
     obj: dict[str, JsonValue] = {}
-    for expected_size, (k, v) in enumerate(pairs, 1):
-        obj[k] = v
-        if len(obj) != expected_size:
+    for k, v in pairs:
+        if k in obj:
             msg = f"duplicate key: {k}"
             raise ValueError(msg)
+        obj[k] = v
     return obj
 
 
