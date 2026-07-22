@@ -102,7 +102,7 @@ def test_maps_from_json_calls_duplicate_hook_for_each_nested_object(
         pytest.param("1000-members", _map_payload(1000), 1000, id="1000-members"),
     ],
 )
-@pytest.mark.benchmark(min_time=0.05, max_time=3)
+@pytest.mark.benchmark(min_time=0.1, max_time=10)
 def test_maps_from_json_duplicate_free(
     _id: str, payload: str, member_count: int, benchmark: BenchmarkFixture
 ) -> None:
