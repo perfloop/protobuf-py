@@ -30,9 +30,11 @@ TREE_NODE_COUNT = 2380
 def _recursive_type() -> type[Any]:
     """Build a fresh generated type so its owner matches the active runtime."""
     from protobuf.wkt import FileDescriptorSet
-    from tests.gen import messages_pb
+    from tests.gen import enums_pb, messages_pb
 
-    registry = FileDescriptorSet(file=[messages_pb.desc().proto]).to_registry()
+    registry = FileDescriptorSet(
+        file=[enums_pb.desc().proto, messages_pb.desc().proto]
+    ).to_registry()
     desc = registry.message("Recursive")
     assert desc is not None
     return desc.type
