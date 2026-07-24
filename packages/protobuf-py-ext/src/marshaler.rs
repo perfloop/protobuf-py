@@ -197,6 +197,26 @@ impl MessageMarshaler {
                 ignore_unknown_fields,
             },
             0,
+            false,
+        )
+    }
+
+    /// Parses deferred bytes while retaining nested message values as deferred snapshots.
+    pub(super) fn materialize_lazy_merge(
+        &self,
+        py: Python<'_>,
+        message: &Bound<'_, NativeMessage>,
+        mut data: Bytes,
+    ) -> PyResult<()> {
+        self.inner.parser.merge_from_binary(
+            py,
+            message,
+            &mut data,
+            FromBinaryOpts {
+                ignore_unknown_fields: false,
+            },
+            0,
+            true,
         )
     }
 

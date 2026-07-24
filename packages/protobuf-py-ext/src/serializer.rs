@@ -575,6 +575,13 @@ impl MessageSerializer {
                 message.get_type()
             )));
         }
+        if opts.write_unknown_fields
+            && let Some(data) = NativeMessage::lazy_merge_data(message, py)?
+        {
+            buffer.prepend_slice(data.bind(py).as_bytes());
+            return Ok(());
+        }
+        NativeMessage::materialize_lazy_merge(message, py)?;
 
         self.validate_oneofs(py, message)?;
 
@@ -651,7 +658,7 @@ impl MessageSerializer {
         message: &Bound<'_, NativeMessage>,
         buffer: &mut ReverseBuffer,
     ) -> PyResult<()> {
-        let Some(unknown_fields_unbound) = message.get().unknown_fields(py) else {
+        let Some(unknown_fields_unbound) = message.get().unknown_fields_internal(py) else {
             return Ok(());
         };
         let unknown_fields = unknown_fields_unbound.bind(py);

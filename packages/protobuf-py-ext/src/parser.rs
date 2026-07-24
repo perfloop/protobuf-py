@@ -242,6 +242,7 @@ impl FieldParser {
         buffer: &mut Bytes,
         opts: FromBinaryOpts,
         depth: usize,
+        defer_messages: bool,
     ) -> PyResult<()> {
         match &self.type_ {
             ParserFieldType::Singular {
@@ -255,6 +256,7 @@ impl FieldParser {
                 buffer,
                 opts,
                 depth,
+                defer_messages,
                 oneof_attr.as_ref(),
                 *requires_presence,
             )?,
@@ -269,6 +271,7 @@ impl FieldParser {
                 buffer,
                 opts,
                 depth,
+                defer_messages,
                 *unpacked_wire_type,
                 *packable,
             )?,
@@ -284,6 +287,7 @@ impl FieldParser {
                 buffer,
                 opts,
                 depth,
+                defer_messages,
                 *key_type,
                 value_parser,
                 key_default_value,
@@ -303,11 +307,20 @@ impl FieldParser {
         buffer: &mut Bytes,
         opts: FromBinaryOpts,
         depth: usize,
+        defer_messages: bool,
         oneof_attr: Option<&AttributeAccess>,
         requires_presence: bool,
     ) -> PyResult<()> {
-        let value =
-            self.read_single_value(py, tag, wire_type, Some(message), buffer, opts, depth)?;
+        let value = self.read_single_value(
+            py,
+            tag,
+            wire_type,
+            Some(message),
+            buffer,
+            opts,
+            depth,
+            defer_messages,
+        )?;
         match value {
             SingleValue::Parsed(value) => {
                 if let Some(oneof_attr) = oneof_attr {
@@ -342,6 +355,7 @@ impl FieldParser {
         buffer: &mut Bytes,
         opts: FromBinaryOpts,
         depth: usize,
+        defer_messages: bool,
         unpacked_wire_type: WireType,
         packable: bool,
     ) -> PyResult<()> {
@@ -360,6 +374,7 @@ impl FieldParser {
                     &mut list_buffer,
                     opts,
                     depth,
+                    defer_messages,
                 )?;
                 match value {
                     SingleValue::Parsed(value) => list.append(value)?,
@@ -376,7 +391,16 @@ impl FieldParser {
                 }
             }
         } else {
-            let value = self.read_single_value(py, tag, wire_type, None, buffer, opts, depth)?;
+            let value = self.read_single_value(
+                py,
+                tag,
+                wire_type,
+                None,
+                buffer,
+                opts,
+                depth,
+                defer_messages,
+            )?;
             match value {
                 SingleValue::Parsed(value) => list.append(value)?,
                 SingleValue::UnknownEnumValue(number) => {
@@ -400,6 +424,7 @@ impl FieldParser {
         buffer: &mut Bytes,
         opts: FromBinaryOpts,
         depth: usize,
+        defer_messages: bool,
         key_type: ScalarType,
         value_parser: &FieldParser,
         key_default_value: &Py<PyAny>,
@@ -447,6 +472,7 @@ impl FieldParser {
                         &mut entry_buffer,
                         opts,
                         depth,
+                        defer_messages,
                     )?);
                 }
                 _ => {
@@ -501,6 +527,7 @@ impl FieldParser {
         buffer: &mut Bytes,
         opts: FromBinaryOpts,
         depth: usize,
+        defer_messages: bool,
     ) -> PyResult<SingleValue<'py>> {
         let value = match &self.value {
             FieldParserValue::Scalar(scalar_type) => read_scalar(py, *scalar_type, buffer)?,
@@ -526,20 +553,29 @@ impl FieldParser {
                 } else {
                     None
                 };
-                let message_instance = if let Some(existing) = existing
+                let (message_instance, has_existing) = if let Some(existing) = existing
                     && !existing.is_none()
                 {
-                    existing.cast_into::<NativeMessage>()?
+                    (existing.cast_into::<NativeMessage>()?, true)
                 } else {
-                    marshaler.new_empty_message(py, parser.inner.python_type.bind(py))?
+                    (
+                        marshaler.new_empty_message(py, parser.inner.python_type.bind(py))?,
+                        false,
+                    )
                 };
-                parser.merge_from_binary(
-                    py,
-                    &message_instance,
-                    &mut message_buffer,
-                    opts,
-                    depth + 1,
-                )?;
+                if defer_messages && !has_existing {
+                    let data = PyBytes::new(py, &message_buffer);
+                    message_instance.get().set_lazy_merge_data(py, &data)?;
+                } else {
+                    parser.merge_from_binary(
+                        py,
+                        &message_instance,
+                        &mut message_buffer,
+                        opts,
+                        depth + 1,
+                        defer_messages,
+                    )?;
+                }
                 message_instance.into_any()
             }
             FieldParserValue::Enum(enum_) => {
@@ -640,6 +676,7 @@ impl MessageParser {
         buffer: &mut Bytes,
         opts: FromBinaryOpts,
         depth: usize,
+        defer_messages: bool,
     ) -> PyResult<()> {
         check_parse_recursion_depth(depth)?;
         while buffer.has_remaining() {
@@ -653,7 +690,16 @@ impl MessageParser {
             if let Some(field) = self.inner.fields.get(field_number)
                 && field.wire_type_matches(wire_type)
             {
-                field.read_field(py, message, tag, wire_type, buffer, opts, depth)?;
+                field.read_field(
+                    py,
+                    message,
+                    tag,
+                    wire_type,
+                    buffer,
+                    opts,
+                    depth,
+                    defer_messages,
+                )?;
             } else {
                 skip_field_with_wire_type(field_number, wire_type, buffer, depth + 1)?;
                 if !opts.ignore_unknown_fields {
@@ -835,7 +881,7 @@ fn write_unknown_field(
     field_number: u32,
     field_bytes: &[u8],
 ) -> PyResult<()> {
-    let unknown_fields_unbound = message.get().get_or_init_unknown_fields(py);
+    let unknown_fields_unbound = message.get().get_or_init_unknown_fields_internal(py);
     let unknown_fields = unknown_fields_unbound.bind(py);
     let field_list = if let Ok(list) = unknown_fields.get_item(field_number) {
         list.cast::<PyList>()?.clone()

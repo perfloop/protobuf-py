@@ -21,7 +21,7 @@ mod protobuf_python_ext {
     use marshaler::MessageMarshaler;
 
     #[pymodule_export]
-    use nativemessage::{NativeMessage, initialize_message_type};
+    use nativemessage::{NativeMessage, initialize_message_type, materialize_lazy_message};
 
     #[pymodule_export]
     use oneof::Oneof;

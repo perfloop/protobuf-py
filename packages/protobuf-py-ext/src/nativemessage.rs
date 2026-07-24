@@ -1,22 +1,33 @@
+use std::sync::{
+    Condvar, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+
 use bytes::Bytes;
 use pyo3::{
     Bound, IntoPyObject as _, IntoPyObjectExt as _, Py, PyAny, PyResult, Python,
-    exceptions::PyTypeError,
+    exceptions::{PyAttributeError, PyTypeError},
     pyclass, pyfunction, pymethods,
     sync::PyOnceLock,
     types::{
-        PyAnyMethods as _, PyBytes, PyDict, PyDictMethods as _, PyList, PyListMethods as _,
-        PyString, PyTuple, PyType, PyTypeMethods as _,
+        PyAnyMethods as _, PyBytes, PyBytesMethods as _, PyDict, PyDictMethods as _, PyList,
+        PyListMethods as _, PyString, PyStringMethods as _, PyTuple, PyType, PyTypeMethods as _,
     },
 };
 
 use crate::{
-    attribute_access::generic_setattr,
+    attribute_access::{generic_getattr, generic_setattr},
     bitset::BitSet,
     constants::Constants,
     marshaler::{Member, MessageMarshaler},
     oneof::Oneof,
 };
+
+enum LazyMergeState {
+    Inactive,
+    Ready(Py<PyBytes>),
+    Materializing,
+}
 
 /// Base class inserted into Python message types to provide accelerated functions.
 ///
@@ -30,6 +41,14 @@ pub(super) struct NativeMessage {
 
     present: BitSet,
     unknown_fields: PyOnceLock<Py<PyDict>>,
+    // A pre-merge field access can hand a caller an empty list, dict, or unknown-field
+    // dictionary. Such a target must populate those retained containers before merge returns.
+    mutable_state_exposed: AtomicBool,
+    // A wire snapshot makes a merge into an empty target independent from later source changes
+    // without allocating the target's complete descendant tree. The mutex elects exactly one
+    // materializer while other concurrent readers wait for a complete message state.
+    lazy_merge: Mutex<LazyMergeState>,
+    lazy_merge_ready: Condvar,
 }
 
 #[pymethods]
@@ -60,6 +79,9 @@ impl NativeMessage {
             marshaler,
             present,
             unknown_fields: PyOnceLock::new(),
+            mutable_state_exposed: AtomicBool::new(false),
+            lazy_merge: Mutex::new(LazyMergeState::Inactive),
+            lazy_merge_ready: Condvar::new(),
         })
     }
 
@@ -72,6 +94,9 @@ impl NativeMessage {
         let marshaler = NativeMessage::get_marshaler(slf)?;
         marshaler.fill_empty_message(py, slf)?;
         if let Some(kwargs) = kwargs {
+            slf.get()
+                .mutable_state_exposed
+                .store(true, Ordering::Release);
             for (key, value) in kwargs {
                 if value.is_none() {
                     continue;
@@ -118,7 +143,52 @@ impl NativeMessage {
         py: Python<'py>,
         write_unknown_fields: bool,
     ) -> PyResult<Bound<'py, PyBytes>> {
+        if write_unknown_fields && let Some(data) = NativeMessage::lazy_merge_data(slf, py)? {
+            return Ok(data.bind(py).clone());
+        }
+        NativeMessage::materialize_lazy_merge(slf, py)?;
         NativeMessage::get_marshaler(slf)?.to_binary(py, slf, write_unknown_fields)
+    }
+
+    fn __getattribute__<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        name: &Bound<'_, PyString>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if slf.get().marshaler.is_none() {
+            return generic_getattr(slf, name);
+        }
+        let marshaler = NativeMessage::get_marshaler(slf)?;
+        if let Some(member_any) = marshaler.members_by_name.bind(py).get_item(name)? {
+            slf.get().mark_mutable_state_exposed();
+            NativeMessage::materialize_lazy_merge(slf, py)?;
+            // SAFETY - members is a private dict which we only insert Member into.
+            let member = unsafe { member_any.cast_unchecked::<Member>() }.get();
+            // Retrieve through the original slot descriptor so normal field reads do not pay for
+            // the wrapper that exists solely for object.__getattribute__ callers.
+            return member.attr.get(py, slf);
+        }
+        let name_str = name.to_str()?;
+        if matches!(
+            name_str,
+            "_unknown_fields"
+                | "_present"
+                | "_get_or_init_unknown_fields"
+                | "_get_field_number_present"
+                | "_set_field_number_present"
+                | "_clear_field_number_present"
+        ) {
+            NativeMessage::materialize_lazy_merge(slf, py)?;
+        }
+        generic_getattr(slf, name)
+    }
+
+    fn __getattr__<'py>(slf: &Bound<'py, Self>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+        Err(PyAttributeError::new_err(format!(
+            "'{}' object has no attribute '{}'",
+            slf.get_type().name()?,
+            name
+        )))
     }
 
     fn __setattr__(
@@ -130,6 +200,10 @@ impl NativeMessage {
         let marshaler = NativeMessage::get_marshaler(slf)?;
 
         if let Some(member_any) = marshaler.members_by_name.bind(py).get_item(name)? {
+            slf.get()
+                .mutable_state_exposed
+                .store(true, Ordering::Release);
+            NativeMessage::materialize_lazy_merge(slf, py)?;
             // SAFETY - members is a private dict which we only insert Member into.
             let member = unsafe { member_any.cast_unchecked::<Member>() }.get();
             member.attr.set(slf, value)?;
@@ -148,6 +222,7 @@ impl NativeMessage {
         slf: &Bound<'py, Self>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, NativeMessage>> {
+        NativeMessage::materialize_lazy_merge(slf, py)?;
         let marshaler = NativeMessage::get_marshaler(slf)?;
 
         let new = marshaler.new_unset_message(&slf.get_type())?;
@@ -168,6 +243,7 @@ impl NativeMessage {
         data: Bytes,
         ignore_unknown_fields: bool,
     ) -> PyResult<()> {
+        NativeMessage::materialize_lazy_merge(slf, py)?;
         NativeMessage::get_marshaler(slf)?.merge_from_binary(py, slf, data, ignore_unknown_fields)
     }
 
@@ -176,6 +252,7 @@ impl NativeMessage {
         py: Python<'py>,
         _memo: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, Self>> {
+        NativeMessage::materialize_lazy_merge(slf, py)?;
         let marshaler = NativeMessage::get_marshaler(slf)?;
 
         let new = marshaler.new_unset_message(&slf.get_type())?;
@@ -218,6 +295,20 @@ impl NativeMessage {
                 source.get_type().qualname()?
             )));
         }
+        if NativeMessage::can_defer_merge(slf, py)? {
+            let data = NativeMessage::serialize_for_lazy_merge(source, py, ignore_unknown_fields)?;
+            let needs_root_materialization =
+                slf.get().mutable_state_exposed.load(Ordering::Acquire);
+            slf.get().set_lazy_merge_data(py, &data)?;
+            if needs_root_materialization {
+                // Populate containers that escaped before merge; descendants created by this parse
+                // retain their own snapshots until a field descriptor exposes them.
+                NativeMessage::materialize_lazy_merge(slf, py)?;
+            }
+            return Ok(());
+        }
+        NativeMessage::materialize_lazy_merge(slf, py)?;
+        NativeMessage::materialize_lazy_merge(source, py)?;
         let source_present = &source.get().present;
         slf.get().present.set_all(source_present);
 
@@ -275,7 +366,7 @@ impl NativeMessage {
             && let Some(source_unknown_fields_unbound) = source.get().unknown_fields.get(py)
         {
             let source_unknown_fields = source_unknown_fields_unbound.bind(py);
-            let self_unknown_fields_unbound = slf.get().get_or_init_unknown_fields(py);
+            let self_unknown_fields_unbound = slf.get().get_or_init_unknown_fields_internal(py);
             let self_unknown_fields = self_unknown_fields_unbound.bind(py);
             for (key, value) in source_unknown_fields {
                 let list = if let Some(existing) = self_unknown_fields.get_item(&key)? {
@@ -294,35 +385,61 @@ impl NativeMessage {
         Ok(())
     }
 
-    fn _get_field_number_present(&self, field_number: u32) -> bool {
-        self.present.get(field_number)
+    fn _get_field_number_present(
+        slf: &Bound<'_, Self>,
+        py: Python<'_>,
+        field_number: u32,
+    ) -> PyResult<bool> {
+        NativeMessage::materialize_lazy_merge(slf, py)?;
+        Ok(slf.get().present.get(field_number))
     }
 
-    fn _set_field_number_present(&self, field_number: u32) {
-        self.present.set(field_number, true);
+    fn _set_field_number_present(
+        slf: &Bound<'_, Self>,
+        py: Python<'_>,
+        field_number: u32,
+    ) -> PyResult<()> {
+        NativeMessage::materialize_lazy_merge(slf, py)?;
+        slf.get().present.set(field_number, true);
+        Ok(())
     }
 
-    fn _clear_field_number_present(&self, field_number: u32) {
-        self.present.set(field_number, false);
+    fn _clear_field_number_present(
+        slf: &Bound<'_, Self>,
+        py: Python<'_>,
+        field_number: u32,
+    ) -> PyResult<()> {
+        NativeMessage::materialize_lazy_merge(slf, py)?;
+        slf.get().present.set(field_number, false);
+        Ok(())
     }
 
     #[getter]
-    fn _present<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+    fn _present<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        NativeMessage::materialize_lazy_merge(slf, py)?;
         let list = PyList::empty(py);
-        self.present.for_each(|i| list.append(i))?;
+        slf.get().present.for_each(|i| list.append(i))?;
         Ok(list)
     }
 
     #[pyo3(name = "_get_or_init_unknown_fields")]
-    pub(super) fn get_or_init_unknown_fields(&self, py: Python<'_>) -> Py<PyDict> {
-        self.unknown_fields
-            .get_or_init(py, || PyDict::new(py).unbind())
-            .clone_ref(py)
+    fn get_or_init_unknown_fields_public(
+        slf: &Bound<'_, Self>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyDict>> {
+        slf.get().mark_mutable_state_exposed();
+        NativeMessage::materialize_lazy_merge(slf, py)?;
+        Ok(slf.get().get_or_init_unknown_fields_internal(py))
     }
 
     #[getter(_unknown_fields)]
-    pub(super) fn unknown_fields(&self, py: Python<'_>) -> Option<Py<PyDict>> {
-        self.unknown_fields.get(py).map(|v| v.clone_ref(py))
+    fn unknown_fields_public(
+        slf: &Bound<'_, Self>,
+        py: Python<'_>,
+    ) -> PyResult<Option<Py<PyDict>>> {
+        slf.get().mark_mutable_state_exposed();
+        NativeMessage::materialize_lazy_merge(slf, py)?;
+        Ok(slf.get().unknown_fields_internal(py))
     }
 }
 
@@ -335,17 +452,151 @@ impl NativeMessage {
         self.present.get(field_number)
     }
 
+    pub(crate) fn mark_mutable_state_exposed(&self) {
+        self.mutable_state_exposed.store(true, Ordering::Release);
+    }
+
+    pub(super) fn get_or_init_unknown_fields_internal(&self, py: Python<'_>) -> Py<PyDict> {
+        self.unknown_fields
+            .get_or_init(py, || PyDict::new(py).unbind())
+            .clone_ref(py)
+    }
+
+    pub(super) fn unknown_fields_internal(&self, py: Python<'_>) -> Option<Py<PyDict>> {
+        self.unknown_fields.get(py).map(|v| v.clone_ref(py))
+    }
+
+    /// Returns the deferred wire snapshot, waiting for an in-progress materialization.
+    pub(crate) fn lazy_merge_data<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Option<Py<PyBytes>>> {
+        let mut state = slf
+            .get()
+            .lazy_merge
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        loop {
+            match &*state {
+                LazyMergeState::Inactive => return Ok(None),
+                LazyMergeState::Ready(data) => return Ok(Some(data.clone_ref(py))),
+                LazyMergeState::Materializing => {
+                    state = slf
+                        .get()
+                        .lazy_merge_ready
+                        .wait(state)
+                        .unwrap_or_else(|poison| poison.into_inner());
+                }
+            }
+        }
+    }
+
+    /// Saves wire bytes for a merge that can defer building target field values.
+    pub(crate) fn set_lazy_merge_data(
+        &self,
+        _py: Python<'_>,
+        data: &Bound<'_, PyBytes>,
+    ) -> PyResult<()> {
+        let mut state = self
+            .lazy_merge
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        while matches!(*state, LazyMergeState::Materializing) {
+            state = self
+                .lazy_merge_ready
+                .wait(state)
+                .unwrap_or_else(|poison| poison.into_inner());
+        }
+        *state = LazyMergeState::Ready(data.clone().unbind());
+        Ok(())
+    }
+
+    /// Parses a deferred snapshot before an operation exposes or changes mutable state.
+    pub(crate) fn materialize_lazy_merge(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<()> {
+        let data = {
+            let mut state = slf
+                .get()
+                .lazy_merge
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            loop {
+                match &*state {
+                    LazyMergeState::Inactive => return Ok(()),
+                    LazyMergeState::Ready(data) => {
+                        let data = data.clone_ref(py);
+                        *state = LazyMergeState::Materializing;
+                        break data;
+                    }
+                    LazyMergeState::Materializing => {
+                        state = slf
+                            .get()
+                            .lazy_merge_ready
+                            .wait(state)
+                            .unwrap_or_else(|poison| poison.into_inner());
+                    }
+                }
+            }
+        };
+        let bytes = Bytes::copy_from_slice(data.bind(py).as_bytes());
+        let result = NativeMessage::get_marshaler(slf)
+            .and_then(|marshaler| marshaler.materialize_lazy_merge(py, slf, bytes));
+        let mut state = slf
+            .get()
+            .lazy_merge
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *state = if result.is_ok() {
+            LazyMergeState::Inactive
+        } else {
+            LazyMergeState::Ready(data)
+        };
+        slf.get().lazy_merge_ready.notify_all();
+        result
+    }
+
+    /// Defers only a wire-empty target, for which source wire bytes exactly represent merge output.
+    fn can_defer_merge(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<bool> {
+        if NativeMessage::lazy_merge_data(slf, py)?.is_some() {
+            return Ok(false);
+        }
+        Ok(NativeMessage::get_marshaler(slf)?
+            .to_binary(py, slf, true)?
+            .as_bytes()
+            .is_empty())
+    }
+
+    /// Serializes a source at the ownership boundary, preserving its state at merge time.
+    fn serialize_for_lazy_merge<'py>(
+        source: &Bound<'py, Self>,
+        py: Python<'py>,
+        ignore_unknown_fields: bool,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        if !ignore_unknown_fields && let Some(data) = NativeMessage::lazy_merge_data(source, py)? {
+            return Ok(data.bind(py).clone());
+        }
+        NativeMessage::materialize_lazy_merge(source, py)?;
+        NativeMessage::get_marshaler(source)?.to_binary(py, source, !ignore_unknown_fields)
+    }
+
     fn get_marshaler(slf: &Bound<'_, Self>) -> PyResult<MessageMarshaler> {
         if let Some(marshaler) = &slf.get().marshaler {
             Ok(marshaler.clone())
         } else {
-            Ok(slf
-                .getattr(&Constants::get(slf.py())?.ext_marshaler)?
-                .cast::<MessageMarshaler>()?
-                .get()
-                .clone())
+            Ok(
+                generic_getattr(slf, Constants::get(slf.py())?.ext_marshaler.bind(slf.py()))?
+                    .cast::<MessageMarshaler>()?
+                    .get()
+                    .clone(),
+            )
         }
     }
+}
+
+#[pyfunction]
+pub(super) fn materialize_lazy_message(message: &Bound<'_, PyAny>) -> PyResult<()> {
+    let message = message.cast::<NativeMessage>()?;
+    message.get().mark_mutable_state_exposed();
+    NativeMessage::materialize_lazy_merge(message, message.py())
 }
 
 #[pyfunction]
@@ -420,7 +671,7 @@ fn copy_unknown_fields(
     source: &Bound<'_, NativeMessage>,
 ) -> PyResult<()> {
     if let Some(source_unknown_fields) = source.get().unknown_fields.get(py) {
-        let target_unknown_fields_unbound = target.get().get_or_init_unknown_fields(py);
+        let target_unknown_fields_unbound = target.get().get_or_init_unknown_fields_internal(py);
         let target_unknown_fields = target_unknown_fields_unbound.bind(py);
         for (key, value) in source_unknown_fields.bind(py) {
             let list = value.cast::<PyList>()?;

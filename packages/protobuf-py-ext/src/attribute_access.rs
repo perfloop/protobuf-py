@@ -2,8 +2,10 @@ use pyo3::{
     Bound, Py, PyAny, PyErr, PyResult, Python,
     exceptions::PyAttributeError,
     pyfunction,
-    types::{PyAnyMethods as _, PyString, PyType},
+    types::{PyAnyMethods as _, PyString, PyStringMethods as _, PyType, PyTypeMethods as _},
 };
+
+use crate::nativemessage::NativeMessage;
 
 /// Access to a Python attribute, to optimize access to slots.
 ///
@@ -21,6 +23,8 @@ use pyo3::{
 /// internals should be verified by tests, or not done at all.
 pub(crate) enum AttributeAccess {
     Offset(usize),
+    /// The original class descriptor, retained before lazy field wrappers are installed.
+    Descriptor(Py<PyAny>),
     Name(Py<PyString>),
 }
 
@@ -35,6 +39,8 @@ impl AttributeAccess {
     ) -> Self {
         if let Ok(Some(offset)) = Self::try_compute_slot_offset(py_type, attr_name) {
             Self::Offset(offset)
+        } else if let Ok(descriptor) = py_type.getattr(attr_name) {
+            Self::Descriptor(descriptor.unbind())
         } else {
             Self::Name(attr_name.clone().unbind())
         }
@@ -63,7 +69,10 @@ impl AttributeAccess {
                 }
                 Ok(unsafe { Bound::from_borrowed_ptr(py, raw) })
             }
-            Self::Name(name) => obj.getattr(name),
+            Self::Descriptor(descriptor) => descriptor
+                .bind(py)
+                .call_method1("__get__", (obj, obj.get_type())),
+            Self::Name(name) => generic_getattr(obj, name.bind(py)),
         }
     }
 
@@ -89,13 +98,20 @@ impl AttributeAccess {
                 }
                 Ok(())
             }
-            Self::Name(name) => generic_setattr(obj, name.bind(obj.py()), value),
+            Self::Descriptor(descriptor) => {
+                descriptor
+                    .bind(obj.py())
+                    .call_method1("__set__", (obj, value))?;
+                Ok(())
+            }
+            Self::Name(name) => generic_setattr_unchecked(obj, name.bind(obj.py()), value),
         }
     }
 
     pub(crate) fn clone_ref(&self, py: Python<'_>) -> Self {
         match self {
             Self::Offset(offset) => Self::Offset(*offset),
+            Self::Descriptor(descriptor) => Self::Descriptor(descriptor.clone_ref(py)),
             Self::Name(name) => Self::Name(name.clone_ref(py)),
         }
     }
@@ -145,11 +161,25 @@ impl AttributeAccess {
     }
 }
 
-/// Wrapper around raw ffi for `PyObject_GenericSetAttr`. It is not exposed natively by `PyO3` for being a relatively
-/// niche API. So is this file - we end up needing it after implementing __setattr__ in native since the standard
-/// setattr would call into it leading to infinite recursion.
-#[pyfunction]
-pub(crate) fn generic_setattr(
+/// Read an attribute without re-entering an object's custom ``__getattribute__``.
+pub(crate) fn generic_getattr<'py>(
+    obj: &Bound<'py, PyAny>,
+    name: &Bound<'_, PyString>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let value = unsafe { pyo3::ffi::PyObject_GenericGetAttr(obj.as_ptr(), name.as_ptr()) };
+    if value.is_null() {
+        let _err = PyErr::fetch(obj.py());
+        return Err(PyAttributeError::new_err(format!(
+            "'{}' object has no attribute '{}'",
+            obj.get_type().name()?,
+            name.to_str()?
+        )));
+    }
+    Ok(unsafe { Bound::from_owned_ptr(obj.py(), value) })
+}
+
+/// Wrapper around raw ffi for `PyObject_GenericSetAttr` which bypasses custom setters.
+fn generic_setattr_unchecked(
     obj: &Bound<'_, PyAny>,
     name: &Bound<'_, PyString>,
     value: &Bound<'_, PyAny>,
@@ -161,4 +191,20 @@ pub(crate) fn generic_setattr(
     } else {
         Ok(())
     }
+}
+
+/// Wrapper around raw ffi for `PyObject_GenericSetAttr`. It is not exposed natively by `PyO3` for being a relatively
+/// niche API. So is this file - we end up needing it after implementing __setattr__ in native since the standard
+/// setattr would call into it leading to infinite recursion.
+#[pyfunction]
+pub(crate) fn generic_setattr(
+    obj: &Bound<'_, PyAny>,
+    name: &Bound<'_, PyString>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    if let Ok(message) = obj.cast::<NativeMessage>() {
+        message.get().mark_mutable_state_exposed();
+        NativeMessage::materialize_lazy_merge(message, obj.py())?;
+    }
+    generic_setattr_unchecked(obj, name, value)
 }
