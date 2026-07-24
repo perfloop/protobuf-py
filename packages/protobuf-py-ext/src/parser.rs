@@ -16,8 +16,8 @@ use pyo3::{
     Bound, IntoPyObjectExt as _, Py, PyAny, PyErr, PyResult, Python,
     exceptions::{PyRecursionError, PyValueError},
     types::{
-        PyAnyMethods as _, PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PyListMethods as _,
-        PyString, PyType,
+        PyAnyMethods as _, PyBool, PyBytes, PyDict, PyDictMethods as _, PyFloat, PyInt, PyList,
+        PyListMethods as _, PyString, PyType,
     },
 };
 
@@ -496,7 +496,18 @@ impl FieldParser {
         };
         let python_dict = self.attr.get(py, message)?;
         let dict = python_dict.cast::<PyDict>()?;
-        dict.set_item(key, value)?;
+        if defer_messages {
+            // Reverse-buffer serialization emits map entries backwards. Keep the source
+            // insertion order so materializing any subset still reserializes byte-for-byte.
+            let existing = dict.iter().collect::<Vec<_>>();
+            dict.clear();
+            dict.set_item(&key, &value)?;
+            for (key, value) in existing {
+                dict.set_item(key, value)?;
+            }
+        } else {
+            dict.set_item(key, value)?;
+        }
         Ok(())
     }
 
@@ -565,7 +576,7 @@ impl FieldParser {
                 };
                 if defer_messages && !has_existing {
                     let data = PyBytes::new(py, &message_buffer);
-                    message_instance.get().set_lazy_merge_data(py, &data)?;
+                    NativeMessage::set_lazy_merge_data(&message_instance, py, &data)?;
                 } else {
                     parser.merge_from_binary(
                         py,
@@ -883,7 +894,7 @@ fn write_unknown_field(
 ) -> PyResult<()> {
     let unknown_fields_unbound = message.get().get_or_init_unknown_fields_internal(py);
     let unknown_fields = unknown_fields_unbound.bind(py);
-    let field_list = if let Ok(list) = unknown_fields.get_item(field_number) {
+    let field_list = if let Some(list) = unknown_fields.get_item(field_number)? {
         list.cast::<PyList>()?.clone()
     } else {
         let new_list = PyList::empty(py);

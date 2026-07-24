@@ -35,6 +35,10 @@ use crate::{
 pub(crate) struct ToBinaryOpts {
     /// Whether to include unknown fields when writing wire bytes.
     pub(crate) write_unknown_fields: bool,
+    /// Whether to record omitted unknown fields in the output buffer.
+    pub(crate) track_omitted_unknown_fields: bool,
+    /// Whether to record nested message values with caller-defined concrete classes.
+    pub(crate) track_noncanonical_message_types: bool,
 }
 
 /// Per-field serialization mode and container-specific state.
@@ -309,6 +313,12 @@ impl FieldSerializer {
                 message: message_desc,
                 end_tag,
             } => {
+                if opts.track_noncanonical_message_types && !value.is_none() {
+                    let message = value.cast::<NativeMessage>()?;
+                    if !message.get_type().is(message_desc.get_python_type(py)) {
+                        buffer.mark_noncanonical_message_type();
+                    }
+                }
                 if let Some(end_tag) = end_tag {
                     // Group encoding: the end tag is the final byte and so is
                     // prepended first, ahead of the submessage payload.
@@ -588,6 +598,13 @@ impl MessageSerializer {
         // Unknown fields should be at the end so we write them first.
         if opts.write_unknown_fields {
             Self::write_unknown_fields(py, message, buffer)?;
+        } else if opts.track_omitted_unknown_fields
+            && message
+                .get()
+                .unknown_fields_internal(py)
+                .is_some_and(|fields| !fields.bind(py).is_empty())
+        {
+            buffer.mark_omitted_unknown_fields();
         }
 
         for field in self.inner.fields.iter().rev() {
@@ -600,6 +617,39 @@ impl MessageSerializer {
         }
 
         Ok(())
+    }
+
+    /// Returns whether known fields would encode no wire data, without validating required fields.
+    pub(crate) fn is_wire_empty(
+        &self,
+        py: Python<'_>,
+        message: &Bound<'_, NativeMessage>,
+    ) -> PyResult<bool> {
+        for field in self.inner.fields.iter() {
+            if let Some(oneof) = &field.oneof {
+                if !oneof.get(py, message)?.is_none() {
+                    return Ok(false);
+                }
+                continue;
+            }
+            let value = field.attr.get(py, message)?;
+            if matches!(field.presence, FieldPresence::Implicit) {
+                if !field.serializer.is_zero_value(&value)? {
+                    return Ok(false);
+                }
+                continue;
+            }
+            let present = if matches!(field.serializer.value, FieldSerializerValue::Message { .. })
+            {
+                !value.is_none()
+            } else {
+                message.get().has_present_field(field.number)
+            };
+            if present {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Gets a field value if it should be serialized for this message.

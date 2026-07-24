@@ -52,6 +52,15 @@ impl BitSet {
         }
     }
 
+    /// Clears every presence bit.
+    pub(crate) fn clear(&self) {
+        let inner = &mut *self.inner.lock().unwrap();
+        match inner {
+            BitSetInner::Inline(bits) => bits.fill(false),
+            BitSetInner::Set(set) => set.clear(),
+        }
+    }
+
     pub(crate) fn get(&self, field_number: u32) -> bool {
         let inner = &*self.inner.lock().unwrap();
         match inner {

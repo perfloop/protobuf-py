@@ -17,7 +17,7 @@ from typing import Any
 
 
 class _LazyFieldDescriptor:
-    """Materializes a native message before exposing one of its slot values."""
+    """Materializes a nested wire snapshot before exposing its slot."""
 
     __slots__ = ("_slot",)
 
@@ -40,7 +40,8 @@ class _LazyFieldDescriptor:
 
 
 try:
-    from protobuf_ext import NativeMessage, generic_setattr, materialize_lazy_message
+    from protobuf_ext import NativeMessage, generic_setattr
+    from protobuf_ext._protobuf_ext import materialize_lazy_message
 
     NativeMessageClass = NativeMessage
     # Workaround Python <3.13 prevents calling object.__setattr__ on objects with
@@ -50,12 +51,41 @@ except ImportError:
     NativeMessageClass = None
     object_setattr = object.__setattr__
 
+    def materialize_lazy_message(message: object) -> None:
+        _ = message
 
-def install_lazy_field_descriptors(message_type: type[Any]) -> None:
-    """Wrap generated slots so ``object.__getattribute__`` observes lazy state too."""
+
+_lazy_message_types: dict[type[Any], type[Any]] = {}
+
+
+def lazy_message_type(message_type: type[Any]) -> type[Any]:
+    """Return a slot-compatible lazy subclass without changing ordinary messages."""
     if NativeMessageClass is None:
-        return
+        return message_type
+    if lazy_type := _lazy_message_types.get(message_type):
+        return lazy_type
+
+    def reduce_ex(instance: Any, protocol: int) -> Any:
+        materialize_lazy_message(instance)
+        return object.__reduce_ex__(instance, protocol)
+
+    def repr_(instance: Any) -> str:
+        materialize_lazy_message(instance)
+        return repr(instance)
+
+    lazy_type = type(
+        f"_{message_type.__name__}Lazy",
+        (message_type,),
+        {
+            "__slots__": (),
+            "__module__": __name__,
+            "__reduce_ex__": reduce_ex,
+            "__repr__": repr_,
+        },
+    )
     for name in message_type.__slots__:
         slot = vars(message_type).get(name)
-        if slot is not None and not isinstance(slot, _LazyFieldDescriptor):
-            setattr(message_type, name, _LazyFieldDescriptor(slot))
+        if slot is not None:
+            setattr(lazy_type, name, _LazyFieldDescriptor(slot))
+    _lazy_message_types[message_type] = lazy_type
+    return lazy_type

@@ -1,4 +1,7 @@
-use std::{ops::Deref, sync::Arc};
+use std::{
+    ops::Deref,
+    sync::{Arc, Mutex},
+};
 
 use bytes::Bytes;
 use pyo3::{
@@ -55,6 +58,8 @@ pub(crate) struct MessageMarshalerInner {
     pub(crate) serializer: MessageSerializer,
     pub(crate) members_by_name: Py<PyDict>,
     pub(crate) members: Vec<Member>,
+    /// Caches the lazy subclass that owns object-bypass field descriptors.
+    lazy_field_type: Mutex<Option<Py<PyType>>>,
 
     /// The maximum field number of the message.
     pub(crate) max_field_number: u32,
@@ -173,12 +178,36 @@ impl MessageMarshaler {
                 serializer,
                 members_by_name: members_by_name.unbind(),
                 members,
+                lazy_field_type: Mutex::new(None),
                 max_field_number,
                 python_type: python_type.clone().unbind(),
                 defaults,
                 constants: constants.clone(),
             }),
         })
+    }
+
+    /// Returns the lazy subclass that owns object-bypass field descriptors.
+    pub(super) fn lazy_field_type(
+        &self,
+        py: Python<'_>,
+        message_type: &Bound<'_, PyType>,
+    ) -> PyResult<Py<PyType>> {
+        let mut cached_lazy_type = self
+            .lazy_field_type
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(lazy_type) = &*cached_lazy_type {
+            return Ok(lazy_type.clone_ref(py));
+        }
+        let lazy_type = py
+            .import("protobuf._native_message")?
+            .getattr("lazy_message_type")?
+            .call1((message_type,))?
+            .cast_into::<PyType>()?
+            .unbind();
+        *cached_lazy_type = Some(lazy_type.clone_ref(py));
+        Ok(lazy_type)
     }
 
     /// Merges wire bytes into an existing Python message instance.
@@ -201,19 +230,20 @@ impl MessageMarshaler {
         )
     }
 
-    /// Parses deferred bytes while retaining nested message values as deferred snapshots.
-    pub(super) fn materialize_lazy_merge(
+    /// Merges wire bytes while retaining newly created nested messages as snapshots.
+    pub(super) fn merge_from_binary_deferred(
         &self,
         py: Python<'_>,
         message: &Bound<'_, NativeMessage>,
         mut data: Bytes,
+        ignore_unknown_fields: bool,
     ) -> PyResult<()> {
         self.inner.parser.merge_from_binary(
             py,
             message,
             &mut data,
             FromBinaryOpts {
-                ignore_unknown_fields: false,
+                ignore_unknown_fields,
             },
             0,
             true,
@@ -234,9 +264,46 @@ impl MessageMarshaler {
             &mut buffer,
             ToBinaryOpts {
                 write_unknown_fields,
+                track_omitted_unknown_fields: false,
+                track_noncanonical_message_types: false,
             },
         )?;
         Ok(buffer.into_py_bytes(py))
+    }
+
+    /// Checks whether known fields would emit wire data without validating them.
+    pub(super) fn is_wire_empty(
+        &self,
+        py: Python<'_>,
+        message: &Bound<'_, NativeMessage>,
+    ) -> PyResult<bool> {
+        self.inner.serializer.is_wire_empty(py, message)
+    }
+
+    /// Serializes known fields and reports whether a deferred merge would lose provenance.
+    pub(super) fn to_binary_without_unknowns<'py>(
+        &self,
+        py: Python<'py>,
+        message: &Bound<'_, NativeMessage>,
+    ) -> PyResult<(Bound<'py, PyBytes>, bool, bool)> {
+        let mut buffer = ReverseBuffer::new();
+        self.inner.serializer.write_binary(
+            py,
+            message,
+            &mut buffer,
+            ToBinaryOpts {
+                write_unknown_fields: false,
+                track_omitted_unknown_fields: true,
+                track_noncanonical_message_types: true,
+            },
+        )?;
+        let has_omitted_unknown_fields = buffer.has_omitted_unknown_fields();
+        let has_noncanonical_message_type = buffer.has_noncanonical_message_type();
+        Ok((
+            buffer.into_py_bytes(py),
+            has_omitted_unknown_fields,
+            has_noncanonical_message_type,
+        ))
     }
 
     pub(super) fn new_unset_message<'py>(

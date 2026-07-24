@@ -18,7 +18,7 @@ import copy
 
 import pytest
 
-from protobuf import DescField, merge_from_binary, merge_from_json
+from protobuf import DescField, merge_from, merge_from_binary, merge_from_json
 
 from .gen.enums_pb import Color
 from .gen.messages_pb import LegacyRequiredFields
@@ -113,6 +113,14 @@ def test_from_binary_missing_required() -> None:
 def test_merge_from_binary_missing_required() -> None:
     msg = LegacyRequiredFields()
     merge_from_binary(msg, b"")
+
+
+def test_merge_from_empty_required_target(
+    populated_message: LegacyRequiredFields,
+) -> None:
+    target = LegacyRequiredFields()
+    merge_from(target, populated_message)
+    assert target.to_binary() == populated_message.to_binary()
 
 
 def test_from_json_missing_required() -> None:

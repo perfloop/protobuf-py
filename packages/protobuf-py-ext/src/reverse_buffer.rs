@@ -30,6 +30,10 @@ pub(crate) struct ReverseBuffer {
     /// Index of the first written byte. Shrinks toward zero as bytes are
     /// written. Everything in `[pos, len)` is initialized.
     pos: usize,
+    /// Set by serializers that omit unknown bytes while preserving their provenance.
+    has_omitted_unknown_fields: bool,
+    /// Set when an owned nested value has a caller-defined concrete message class.
+    has_noncanonical_message_type: bool,
 }
 
 /// Minimum allocation size once a write forces one, matching upb's encoder
@@ -57,7 +61,31 @@ impl ReverseBuffer {
         Self {
             buf: Vec::new(),
             pos: 0,
+            has_omitted_unknown_fields: false,
+            has_noncanonical_message_type: false,
         }
+    }
+
+    /// Records that a serializer skipped at least one unknown field.
+    pub(crate) fn mark_omitted_unknown_fields(&mut self) {
+        self.has_omitted_unknown_fields = true;
+    }
+
+    /// Whether serialization skipped at least one unknown field.
+    #[must_use]
+    pub(crate) fn has_omitted_unknown_fields(&self) -> bool {
+        self.has_omitted_unknown_fields
+    }
+
+    /// Records that a nested message must retain its concrete Python class.
+    pub(crate) fn mark_noncanonical_message_type(&mut self) {
+        self.has_noncanonical_message_type = true;
+    }
+
+    /// Whether serialization encountered a caller-defined message subclass.
+    #[must_use]
+    pub(crate) fn has_noncanonical_message_type(&self) -> bool {
+        self.has_noncanonical_message_type
     }
 
     /// Number of valid bytes written so far.

@@ -17,7 +17,6 @@ from dataclasses import dataclass, field as dataclassfield
 from enum import IntEnum
 from typing import TYPE_CHECKING, Literal, TypeAlias, cast, final
 
-from ._native_message import install_lazy_field_descriptors
 from ._typing import assert_never
 from ._wire import WireType
 
@@ -372,7 +371,6 @@ class DescMessage:
 
         if initialize_message_type and self._type is not None:
             initialize_message_type(self._type)
-            install_lazy_field_descriptors(self._type)
 
     @property
     def type(self) -> builtins.type[Message]:
@@ -383,7 +381,6 @@ class DescMessage:
         object.__setattr__(self, "_type", _type)
         if initialize_message_type:
             initialize_message_type(_type)
-            install_lazy_field_descriptors(_type)
         return _type
 
     _type: builtins.type[Message] | None = dataclassfield(

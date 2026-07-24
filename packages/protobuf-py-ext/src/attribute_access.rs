@@ -2,7 +2,7 @@ use pyo3::{
     Bound, Py, PyAny, PyErr, PyResult, Python,
     exceptions::PyAttributeError,
     pyfunction,
-    types::{PyAnyMethods as _, PyString, PyStringMethods as _, PyType, PyTypeMethods as _},
+    types::{PyAnyMethods as _, PyString, PyType},
 };
 
 use crate::nativemessage::NativeMessage;
@@ -23,7 +23,7 @@ use crate::nativemessage::NativeMessage;
 /// internals should be verified by tests, or not done at all.
 pub(crate) enum AttributeAccess {
     Offset(usize),
-    /// The original class descriptor, retained before lazy field wrappers are installed.
+    /// Original slot descriptor retained before a lazy barrier wraps the class slot.
     Descriptor(Py<PyAny>),
     Name(Py<PyString>),
 }
@@ -168,12 +168,7 @@ pub(crate) fn generic_getattr<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let value = unsafe { pyo3::ffi::PyObject_GenericGetAttr(obj.as_ptr(), name.as_ptr()) };
     if value.is_null() {
-        let _err = PyErr::fetch(obj.py());
-        return Err(PyAttributeError::new_err(format!(
-            "'{}' object has no attribute '{}'",
-            obj.get_type().name()?,
-            name.to_str()?
-        )));
+        return Err(PyErr::fetch(obj.py()));
     }
     Ok(unsafe { Bound::from_owned_ptr(obj.py(), value) })
 }
@@ -193,9 +188,7 @@ fn generic_setattr_unchecked(
     }
 }
 
-/// Wrapper around raw ffi for `PyObject_GenericSetAttr`. It is not exposed natively by `PyO3` for being a relatively
-/// niche API. So is this file - we end up needing it after implementing __setattr__ in native since the standard
-/// setattr would call into it leading to infinite recursion.
+/// Materializes a native nested snapshot before a generic write bypasses ``__setattr__``.
 #[pyfunction]
 pub(crate) fn generic_setattr(
     obj: &Bound<'_, PyAny>,
@@ -203,7 +196,6 @@ pub(crate) fn generic_setattr(
     value: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
     if let Ok(message) = obj.cast::<NativeMessage>() {
-        message.get().mark_mutable_state_exposed();
         NativeMessage::materialize_lazy_merge(message, obj.py())?;
     }
     generic_setattr_unchecked(obj, name, value)

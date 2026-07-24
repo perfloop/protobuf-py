@@ -16,13 +16,7 @@
 
 from __future__ import annotations
 
-__all__ = [
-    "NativeMessage",
-    "Oneof",
-    "generic_setattr",
-    "initialize_message_type",
-    "materialize_lazy_message",
-]
+__all__ = ["NativeMessage", "Oneof", "generic_setattr", "initialize_message_type"]
 
 from . import _protobuf_ext
 from ._protobuf_ext import (
@@ -30,7 +24,6 @@ from ._protobuf_ext import (
     Oneof,
     generic_setattr,
     initialize_message_type,
-    materialize_lazy_message,
 )
 
 __doc__ = _protobuf_ext.__doc__
